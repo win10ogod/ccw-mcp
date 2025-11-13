@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "ccw-mcp": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/absolute/path/to/ccw-mcp",
+        "run",
+        "ccw-mcp",
+        "--stdio"
+      ]
+    }
+  }
+}

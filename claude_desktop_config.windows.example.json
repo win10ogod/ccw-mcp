@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "ccw-mcp": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "I:\\凌星開發計畫\\凌星OS\\ccw-mcp",
+        "run",
+        "ccw-mcp",
+        "--stdio"
+      ]
+    }
+  }
+}
