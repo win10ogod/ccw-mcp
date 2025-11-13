@@ -2,7 +2,7 @@
 
 import platform
 from pathlib import Path
-from typing import Union
+from typing import Union, Optional
 
 from .linux import LinuxCEL
 from .windows import WindowsCEL
@@ -33,10 +33,24 @@ def create_cel(workspace: Path, base_dir: Path = None) -> CEL:
         return PortableCEL(workspace=workspace, base_dir=base_dir)
 
 
+def rehydrate_cel(workspace: Path, base_dir: Optional[Path], mount_point: Path) -> CEL:
+    """Rehydrate a CEL instance from existing sandbox state."""
+
+    system = platform.system()
+
+    if system == "Linux":
+        return LinuxCEL.rehydrate(workspace=workspace, base_dir=base_dir, mount_point=mount_point)
+    elif system == "Windows":
+        return WindowsCEL.rehydrate(workspace=workspace, base_dir=base_dir, mount_point=mount_point)
+    else:
+        return PortableCEL.rehydrate(workspace=workspace, base_dir=base_dir, mount_point=mount_point)
+
+
 __all__ = [
     'CEL',
     'LinuxCEL',
     'WindowsCEL',
     'PortableCEL',
     'create_cel',
+    'rehydrate_cel',
 ]
