@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
-from ..cel import create_cel, CEL
+from ..cel import create_cel, rehydrate_cel, CEL
 from ..util import hash_file, generate_unified_diff, count_changes
 
 
@@ -36,6 +36,7 @@ class CapsuleRegistry:
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.capsules: Dict[str, tuple[CapsuleMetadata, CEL]] = {}
+        self._load_existing_capsules()
 
     def create(
         self,
@@ -91,6 +92,27 @@ class CapsuleRegistry:
             "clock": metadata.created_at
         }
 
+    def _load_existing_capsules(self):
+        """Load capsules from persisted metadata."""
+
+        if not self.storage_dir.exists():
+            return
+
+        for capsule_dir in self.storage_dir.iterdir():
+            if not capsule_dir.is_dir():
+                continue
+
+            meta_file = capsule_dir / "metadata.json"
+            metadata = self._read_metadata(meta_file)
+            if metadata is None:
+                continue
+
+            entry = self._initialize_capsule_from_metadata(metadata)
+            if entry is None:
+                continue
+
+            self.capsules[metadata.capsule_id] = entry
+
     def get(self, capsule_id: str) -> Optional[tuple[CapsuleMetadata, CEL]]:
         """Get capsule by ID.
 
@@ -100,7 +122,26 @@ class CapsuleRegistry:
         Returns:
             Tuple of (metadata, cel) or None
         """
-        return self.capsules.get(capsule_id)
+        entry = self.capsules.get(capsule_id)
+        if entry:
+            return entry
+
+        return self._load_capsule(capsule_id)
+
+    def _load_capsule(self, capsule_id: str) -> Optional[tuple[CapsuleMetadata, CEL]]:
+        """Load capsule on demand from disk."""
+
+        meta_file = self.storage_dir / capsule_id / "metadata.json"
+        metadata = self._read_metadata(meta_file)
+        if metadata is None:
+            return None
+
+        entry = self._initialize_capsule_from_metadata(metadata)
+        if entry is None:
+            return None
+
+        self.capsules[capsule_id] = entry
+        return entry
 
     def list(self) -> List[str]:
         """List all capsule IDs.
@@ -119,7 +160,7 @@ class CapsuleRegistry:
         Returns:
             True if deleted, False if not found
         """
-        entry = self.capsules.get(capsule_id)
+        entry = self.get(capsule_id)
         if not entry:
             return False
 
@@ -158,7 +199,7 @@ class CapsuleRegistry:
         Returns:
             Execution result
         """
-        entry = self.capsules.get(capsule_id)
+        entry = self.get(capsule_id)
         if not entry:
             return {
                 "exit_code": -1,
@@ -201,7 +242,7 @@ class CapsuleRegistry:
         Returns:
             Dict with summary and diff
         """
-        entry = self.capsules.get(capsule_id)
+        entry = self.get(capsule_id)
         if not entry:
             return {
                 "summary": {"added": 0, "deleted": 0, "modified": 0},
@@ -272,3 +313,60 @@ class CapsuleRegistry:
 
         with open(meta_file, 'w') as f:
             json.dump(meta_dict, f, indent=2)
+
+    def _read_metadata(self, meta_file: Path) -> Optional[CapsuleMetadata]:
+        """Read capsule metadata from disk."""
+
+        if not meta_file.exists():
+            return None
+
+        try:
+            with open(meta_file, 'r') as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+        capsule_id = data.get("capsule_id")
+        workspace = data.get("workspace")
+        if not capsule_id or not workspace:
+            return None
+
+        base_dir = data.get("base_dir")
+        mount_point = data.get("mount_point")
+
+        metadata = CapsuleMetadata(
+            capsule_id=capsule_id,
+            workspace=Path(workspace),
+            base_dir=Path(base_dir) if base_dir else None,
+            created_at=data.get("created_at", datetime.now(timezone.utc).isoformat()),
+            clock_offset_sec=int(data.get("clock_offset_sec", 0)),
+            env_whitelist=data.get("env_whitelist", []),
+            mount_point=Path(mount_point) if mount_point else None,
+        )
+
+        return metadata
+
+    def _initialize_capsule_from_metadata(
+        self,
+        metadata: CapsuleMetadata,
+    ) -> Optional[tuple[CapsuleMetadata, CEL]]:
+        """Initialize CEL from metadata, restoring sandbox if possible."""
+
+        try:
+            if metadata.mount_point and metadata.mount_point.exists():
+                cel = rehydrate_cel(
+                    workspace=metadata.workspace,
+                    base_dir=metadata.base_dir,
+                    mount_point=metadata.mount_point,
+                )
+            else:
+                cel = create_cel(
+                    workspace=metadata.workspace,
+                    base_dir=metadata.base_dir,
+                )
+                metadata.mount_point = cel.mount()
+                self._save_metadata(metadata.capsule_id, metadata)
+        except Exception:
+            return None
+
+        return metadata, cel

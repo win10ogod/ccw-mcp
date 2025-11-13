@@ -226,3 +226,19 @@ class PortableCEL:
         """Clean up sandbox"""
         if self._temp_root and self._temp_root.exists():
             shutil.rmtree(self._temp_root, ignore_errors=True)
+
+    @classmethod
+    def rehydrate(
+        cls,
+        workspace: Path,
+        base_dir: Optional[Path],
+        mount_point: Path,
+    ) -> "PortableCEL":
+        """Rehydrate a PortableCEL from a persisted sandbox."""
+
+        obj = cls.__new__(cls)
+        obj.workspace = workspace
+        obj.base_dir = base_dir or workspace
+        obj._temp_root = mount_point.parent
+        obj.sandbox_dir = mount_point
+        return obj
