@@ -614,18 +614,94 @@ class CCWMCPServer:
         }
 
     def run_stdio(self):
-        """Run server in stdio mode (MCP standard)"""
-        for line in sys.stdin:
+        """Run server in stdio mode (MCP standard)."""
+
+        def read_message(stdin):
+            """Read a single JSON-RPC message from stdin.
+
+            Supports the MCP framing protocol (Content-Length headers)
+            and falls back to newline-delimited JSON for local tooling.
+            Returns a tuple of (payload_bytes, used_content_length).
+            """
+
+            while True:
+                line = stdin.readline()
+                if not line:
+                    return None, False
+
+                # Skip empty separator lines
+                if not line.strip():
+                    continue
+
+                stripped = line.lstrip()
+                if stripped.startswith(b"{"):
+                    # Plain JSON line (legacy fallback)
+                    return line.strip(), False
+
+                # Content-Length framing
+                headers = {}
+                current = line
+                while current and current.strip():
+                    try:
+                        header_line = current.decode("ascii")
+                    except UnicodeDecodeError:
+                        header_line = ""
+                    if ":" in header_line:
+                        key, value = header_line.split(":", 1)
+                        headers[key.strip().lower()] = value.strip()
+                    current = stdin.readline()
+
+                content_length = headers.get("content-length")
+                if content_length is None:
+                    # Malformed headers; continue reading next message
+                    continue
+
+                try:
+                    length = int(content_length)
+                except ValueError:
+                    continue
+
+                payload = stdin.read(length)
+                return payload, True
+
+        def write_message(stdout, payload_bytes, use_content_length):
+            if use_content_length:
+                header = f"Content-Length: {len(payload_bytes)}\r\n\r\n".encode("ascii")
+                stdout.write(header)
+                stdout.write(payload_bytes)
+            else:
+                stdout.write(payload_bytes + b"\n")
+            stdout.flush()
+
+        stdin = sys.stdin.buffer
+        stdout = sys.stdout.buffer
+
+        while True:
+            payload, used_content_length = read_message(stdin)
+            if payload is None:
+                break
+
             try:
-                request = json.loads(line)
-                response = self.handle_request(request)
-                if response is not None:
-                    print(json.dumps(response), flush=True)
+                request = json.loads(payload.decode("utf-8"))
             except json.JSONDecodeError:
+                # Ignore malformed JSON messages
                 continue
-            except Exception as e:
-                error_response = self._error_response(None, -32700, str(e))
-                print(json.dumps(error_response), flush=True)
+            except Exception as exc:  # pragma: no cover - defensive
+                error_response = self._error_response(None, -32700, str(exc))
+                response_bytes = json.dumps(error_response).encode("utf-8")
+                write_message(stdout, response_bytes, used_content_length)
+                continue
+
+            try:
+                response = self.handle_request(request)
+                if response is None:
+                    continue
+                response_bytes = json.dumps(response).encode("utf-8")
+                write_message(stdout, response_bytes, used_content_length)
+            except Exception as exc:
+                error_response = self._error_response(request.get("id"), -32700, str(exc))
+                response_bytes = json.dumps(error_response).encode("utf-8")
+                write_message(stdout, response_bytes, used_content_length)
 
 
 def main():
