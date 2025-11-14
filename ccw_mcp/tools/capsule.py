@@ -1,15 +1,16 @@
-"""Capsule management - core abstraction for counterfactual environments"""
+"""Capsule management - core abstraction for counterfactual environments."""
 
 import json
+import os
 import shutil
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
-from ..cel import create_cel, CEL
-from ..util import hash_file, generate_unified_diff, count_changes
+from ..cel import create_cel, rehydrate_cel, CEL
+from ..util import generate_unified_diff, count_changes
 
 
 @dataclass
@@ -35,7 +36,11 @@ class CapsuleRegistry:
         """
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self.capsules: Dict[str, tuple[CapsuleMetadata, CEL]] = {}
+        # Persisted capsule metadata keyed by id
+        self.capsules: Dict[str, CapsuleMetadata] = {}
+        # Live CEL instances keyed by capsule id (rehydrated lazily)
+        self._cel_cache: Dict[str, CEL] = {}
+        self._load_existing_capsules()
 
     def create(
         self,
@@ -80,7 +85,8 @@ class CapsuleRegistry:
         )
 
         # Store
-        self.capsules[capsule_id] = (metadata, cel)
+        self.capsules[capsule_id] = metadata
+        self._cel_cache[capsule_id] = cel
 
         # Save metadata
         self._save_metadata(capsule_id, metadata)
@@ -91,7 +97,24 @@ class CapsuleRegistry:
             "clock": metadata.created_at
         }
 
-    def get(self, capsule_id: str) -> Optional[tuple[CapsuleMetadata, CEL]]:
+    def _load_existing_capsules(self):
+        """Load capsules from persisted metadata."""
+
+        if not self.storage_dir.exists():
+            return
+
+        for capsule_dir in self.storage_dir.iterdir():
+            if not capsule_dir.is_dir():
+                continue
+
+            meta_file = capsule_dir / "metadata.json"
+            metadata = self._read_metadata(meta_file)
+            if metadata is None:
+                continue
+
+            self.capsules[metadata.capsule_id] = metadata
+
+    def get(self, capsule_id: str) -> Optional[Tuple[CapsuleMetadata, CEL]]:
         """Get capsule by ID.
 
         Args:
@@ -100,7 +123,31 @@ class CapsuleRegistry:
         Returns:
             Tuple of (metadata, cel) or None
         """
-        return self.capsules.get(capsule_id)
+        metadata = self.capsules.get(capsule_id)
+        if metadata is None:
+            metadata = self._load_capsule(capsule_id)
+            if metadata is None:
+                return None
+
+        cel = self._cel_cache.get(capsule_id)
+        if cel is None:
+            cel = self._ensure_cel(metadata)
+            if cel is None:
+                return None
+            self._cel_cache[capsule_id] = cel
+
+        return metadata, cel
+
+    def _load_capsule(self, capsule_id: str) -> Optional[CapsuleMetadata]:
+        """Load capsule metadata from disk."""
+
+        meta_file = self.storage_dir / capsule_id / "metadata.json"
+        metadata = self._read_metadata(meta_file)
+        if metadata is None:
+            return None
+
+        self.capsules[capsule_id] = metadata
+        return metadata
 
     def list(self) -> List[str]:
         """List all capsule IDs.
@@ -119,7 +166,7 @@ class CapsuleRegistry:
         Returns:
             True if deleted, False if not found
         """
-        entry = self.capsules.get(capsule_id)
+        entry = self.get(capsule_id)
         if not entry:
             return False
 
@@ -130,6 +177,8 @@ class CapsuleRegistry:
 
         # Remove from registry
         del self.capsules[capsule_id]
+        if capsule_id in self._cel_cache:
+            del self._cel_cache[capsule_id]
 
         # Remove metadata
         meta_file = self.storage_dir / capsule_id / "metadata.json"
@@ -158,7 +207,7 @@ class CapsuleRegistry:
         Returns:
             Execution result
         """
-        entry = self.capsules.get(capsule_id)
+        entry = self.get(capsule_id)
         if not entry:
             return {
                 "exit_code": -1,
@@ -201,7 +250,7 @@ class CapsuleRegistry:
         Returns:
             Dict with summary and diff
         """
-        entry = self.capsules.get(capsule_id)
+        entry = self.get(capsule_id)
         if not entry:
             return {
                 "summary": {"added": 0, "deleted": 0, "modified": 0},
@@ -230,7 +279,7 @@ class CapsuleRegistry:
             # Generate diff
             if format == "unified":
                 diff = generate_unified_diff(
-                    base_file if base_file and base_file.exists() else Path("/dev/null"),
+                    base_file if base_file and base_file.exists() else Path(os.devnull),
                     new_file
                 )
                 all_diffs.append(diff)
@@ -272,3 +321,68 @@ class CapsuleRegistry:
 
         with open(meta_file, 'w') as f:
             json.dump(meta_dict, f, indent=2)
+
+    def _read_metadata(self, meta_file: Path) -> Optional[CapsuleMetadata]:
+        """Read capsule metadata from disk."""
+
+        if not meta_file.exists():
+            return None
+
+        try:
+            with open(meta_file, 'r') as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+        capsule_id = data.get("capsule_id")
+        workspace = data.get("workspace")
+        if not capsule_id or not workspace:
+            return None
+
+        def _coerce_path(raw: Optional[str]) -> Optional[Path]:
+            if not raw:
+                return None
+
+            path = Path(raw).expanduser()
+            try:
+                return path.resolve()
+            except OSError:
+                return path.absolute()
+
+        metadata = CapsuleMetadata(
+            capsule_id=capsule_id,
+            workspace=_coerce_path(workspace) or Path(workspace),
+            base_dir=_coerce_path(data.get("base_dir")),
+            created_at=data.get("created_at", datetime.now(timezone.utc).isoformat()),
+            clock_offset_sec=int(data.get("clock_offset_sec", 0)),
+            env_whitelist=data.get("env_whitelist", []),
+            mount_point=_coerce_path(data.get("mount_point")),
+        )
+
+        return metadata
+
+    def _ensure_cel(self, metadata: CapsuleMetadata) -> Optional[CEL]:
+        """Ensure a CEL instance exists for the provided metadata."""
+
+        try:
+            if metadata.mount_point:
+                try:
+                    if metadata.mount_point.exists():
+                        return rehydrate_cel(
+                            workspace=metadata.workspace,
+                            base_dir=metadata.base_dir,
+                            mount_point=metadata.mount_point,
+                        )
+                except OSError:
+                    # Fall back to rebuilding below when Windows temp dirs disappear
+                    pass
+
+            cel = create_cel(
+                workspace=metadata.workspace,
+                base_dir=metadata.base_dir,
+            )
+            metadata.mount_point = cel.mount()
+            self._save_metadata(metadata.capsule_id, metadata)
+            return cel
+        except Exception:
+            return None

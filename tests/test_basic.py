@@ -2,6 +2,7 @@
 
 import tempfile
 import shutil
+import sys
 from pathlib import Path
 import pytest
 
@@ -126,6 +127,79 @@ class TestCapsule:
 
         capsules = registry.list()
         assert capsule_id not in capsules
+
+    def test_capsule_persistence_across_instances(self, tmp_path):
+        """Capsules should be accessible after registry reinitialization."""
+
+        storage = tmp_path / "storage"
+        storage.mkdir()
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        registry1 = CapsuleRegistry(storage)
+        create_result = registry1.create(workspace=workspace)
+        capsule_id = create_result["capsule_id"]
+        mount_path = Path(create_result["mount"])
+        (mount_path / "marker.txt").write_text("hello")
+
+        registry2 = CapsuleRegistry(storage)
+        assert capsule_id in registry2.list()
+
+        exec_result = registry2.execute(
+            capsule_id,
+            [sys.executable, "-c", "print('ping')"],
+        )
+
+        assert exec_result["exit_code"] == 0
+        assert "ping" in exec_result["stdout"]
+
+        diff_result = registry2.diff(capsule_id)
+        assert "summary" in diff_result
+
+        registry2.delete(capsule_id)
+
+    def test_capsule_recreates_missing_mount_on_windows(self, tmp_path, monkeypatch):
+        """Windows capsules should recreate sandboxes if the mount disappears."""
+
+        storage = tmp_path / "storage"
+        workspace = tmp_path / "workspace"
+
+        storage.mkdir()
+        workspace.mkdir()
+        (workspace / "baseline.txt").write_text("baseline")
+
+        import ccw_mcp.cel as cel_module
+
+        monkeypatch.setattr(cel_module.platform, "system", lambda: "Windows")
+
+        registry1 = CapsuleRegistry(storage)
+        create_result = registry1.create(workspace=workspace)
+        capsule_id = create_result["capsule_id"]
+        mount_path = Path(create_result["mount"])
+        assert mount_path.exists()
+
+        shutil.rmtree(mount_path.parent, ignore_errors=True)
+
+        registry2 = CapsuleRegistry(storage)
+        exec_result = registry2.execute(
+            capsule_id,
+            [sys.executable, "-c", "print('ping')"],
+        )
+
+        assert exec_result["exit_code"] == 0
+        assert "ping" in exec_result["stdout"]
+
+        diff_result = registry2.diff(capsule_id)
+        assert "summary" in diff_result
+
+        metadata_entry = registry2.get(capsule_id)
+        assert metadata_entry is not None
+        metadata, _ = metadata_entry
+        assert metadata.mount_point is not None
+        assert metadata.mount_point.exists()
+
+        registry2.delete(capsule_id)
 
 
 @pytest.fixture

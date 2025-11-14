@@ -362,3 +362,22 @@ class WindowsCEL:
                     else:
                         # Final attempt with ignore_errors
                         shutil.rmtree(self._temp_root, ignore_errors=True)
+
+    @classmethod
+    def rehydrate(
+        cls,
+        workspace: Path,
+        base_dir: Optional[Path],
+        mount_point: Path,
+    ) -> "WindowsCEL":
+        """Rehydrate a WindowsCEL from a persisted sandbox."""
+
+        obj = cls.__new__(cls)
+        obj.workspace = workspace
+        obj.base_dir = base_dir or workspace
+        obj._temp_root = mount_point.parent
+        obj.sandbox_dir = mount_point
+        obj._monitor_thread = None
+        obj._monitoring = False
+        obj._file_accesses = defaultdict(set)
+        return obj

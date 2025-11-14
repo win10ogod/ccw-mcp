@@ -242,3 +242,23 @@ class LinuxCEL:
 
         if self._temp_root and self._temp_root.exists():
             shutil.rmtree(self._temp_root, ignore_errors=True)
+
+    @classmethod
+    def rehydrate(
+        cls,
+        workspace: Path,
+        base_dir: Optional[Path],
+        mount_point: Path,
+    ) -> "LinuxCEL":
+        """Rehydrate a LinuxCEL from a persisted sandbox."""
+
+        obj = cls.__new__(cls)
+        obj.workspace = workspace
+        obj.base_dir = base_dir or workspace
+        obj.mount_point = mount_point
+        obj.overlay_dir = mount_point.parent
+        obj.upper_dir = obj.overlay_dir / "upper"
+        obj.work_dir = obj.overlay_dir / "work"
+        obj._temp_root = obj.overlay_dir.parent
+        obj._is_mounted = mount_point.exists()
+        return obj
