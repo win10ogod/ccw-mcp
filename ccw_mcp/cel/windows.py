@@ -213,9 +213,13 @@ class WindowsCEL:
                 else:
                     time.sleep(sample_interval)
 
-            # Get output
-            stdout, stderr = proc.communicate(input=stdin, timeout=1.0)
-            exit_code = -1 if timed_out else proc.returncode
+            # Get output (no timeout if we already killed the process)
+            if timed_out:
+                stdout, stderr = proc.communicate()
+                exit_code = -1
+            else:
+                stdout, stderr = proc.communicate(input=stdin, timeout=1.0)
+                exit_code = proc.returncode
 
         except subprocess.TimeoutExpired:
             proc.kill()
