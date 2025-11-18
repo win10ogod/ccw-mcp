@@ -103,8 +103,10 @@ class TestWindowsCEL:
         cel = create_cel(workspace)
 
         # Execute a long-running command with short timeout
+        # Use ping instead of timeout as it works reliably without console
+        # ping -n 11 127.0.0.1 will run for ~10 seconds (1 second per ping)
         result = cel.execute(
-            ["cmd", "/c", "timeout", "/t", "10"],
+            ["ping", "-n", "11", "127.0.0.1"],
             timeout_ms=500  # 500ms timeout
         )
 
