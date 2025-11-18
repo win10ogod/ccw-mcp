@@ -1,9 +1,77 @@
-"""Diff generation utilities"""
+"""Diff generation utilities (optimized)"""
 
 import difflib
 import json
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional, Any, Iterator
+from .hashing import hash_file
+
+# Large file threshold: files larger than this use optimized processing
+LARGE_FILE_THRESHOLD = 10 * 1024 * 1024  # 10 MB
+
+
+def files_identical(old_path: Path, new_path: Path) -> bool:
+    """Fast check if two files are identical using hash comparison.
+
+    Args:
+        old_path: Original file path
+        new_path: Modified file path
+
+    Returns:
+        True if files are identical, False otherwise
+    """
+    # Quick checks first
+    if not old_path.exists() or not new_path.exists():
+        return False
+
+    # Size check (fastest)
+    try:
+        old_size = old_path.stat().st_size
+        new_size = new_path.stat().st_size
+        if old_size != new_size:
+            return False
+    except OSError:
+        return False
+
+    # Hash comparison for definitive answer
+    try:
+        old_hash = hash_file(old_path)
+        new_hash = hash_file(new_path)
+        return old_hash == new_hash
+    except Exception:
+        return False
+
+
+def read_lines_chunked(path: Path, chunk_size: int = 1024 * 1024) -> Iterator[str]:
+    """Read file lines in chunks to reduce memory usage.
+
+    Args:
+        path: File path to read
+        chunk_size: Size of chunks to read (default 1MB)
+
+    Yields:
+        Lines from the file
+    """
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            buffer = ""
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    if buffer:
+                        yield buffer
+                    break
+
+                buffer += chunk
+                lines = buffer.split('\n')
+                # Keep last incomplete line in buffer
+                buffer = lines[-1]
+
+                # Yield complete lines
+                for line in lines[:-1]:
+                    yield line + '\n'
+    except FileNotFoundError:
+        return
 
 
 def generate_unified_diff(
@@ -11,7 +79,7 @@ def generate_unified_diff(
     new_path: Path,
     context_lines: int = 3
 ) -> str:
-    """Generate unified diff between two files.
+    """Generate unified diff between two files (optimized).
 
     Args:
         old_path: Original file path
@@ -21,17 +89,33 @@ def generate_unified_diff(
     Returns:
         Unified diff string
     """
-    try:
-        with open(old_path, 'r', encoding='utf-8', errors='replace') as f:
-            old_lines = f.readlines()
-    except FileNotFoundError:
-        old_lines = []
+    # Fast path: check if files are identical
+    if old_path.exists() and new_path.exists():
+        if files_identical(old_path, new_path):
+            return ""  # No diff needed
 
-    try:
-        with open(new_path, 'r', encoding='utf-8', errors='replace') as f:
-            new_lines = f.readlines()
-    except FileNotFoundError:
-        new_lines = []
+    # Check file sizes to determine processing strategy
+    old_size = old_path.stat().st_size if old_path.exists() else 0
+    new_size = new_path.stat().st_size if new_path.exists() else 0
+    is_large = max(old_size, new_size) > LARGE_FILE_THRESHOLD
+
+    if is_large:
+        # For large files, use chunked reading
+        old_lines = list(read_lines_chunked(old_path))
+        new_lines = list(read_lines_chunked(new_path))
+    else:
+        # For small files, read normally
+        try:
+            with open(old_path, 'r', encoding='utf-8', errors='replace') as f:
+                old_lines = f.readlines()
+        except FileNotFoundError:
+            old_lines = []
+
+        try:
+            with open(new_path, 'r', encoding='utf-8', errors='replace') as f:
+                new_lines = f.readlines()
+        except FileNotFoundError:
+            new_lines = []
 
     diff = difflib.unified_diff(
         old_lines,
