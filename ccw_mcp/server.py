@@ -3,6 +3,8 @@
 import sys
 import json
 import argparse
+import signal
+import atexit
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -17,7 +19,7 @@ from .policy import PolicyEngine, PolicyRule
 
 
 class CCWMCPServer:
-    """CCW-MCP Server implementing MCP protocol"""
+    """CCW-MCP Server implementing MCP protocol (optimized)"""
 
     def __init__(self, storage_dir: Path):
         """Initialize server.
@@ -27,6 +29,7 @@ class CCWMCPServer:
         """
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self._shutdown = False
 
         # Initialize components
         self.capsules = CapsuleRegistry(storage_dir / "capsules")
@@ -36,8 +39,33 @@ class CCWMCPServer:
         self.deltamin = DeltaMinimizer()
         self.commute = CommutativityAnalyzer()
 
+        # Register cleanup handlers
+        atexit.register(self.cleanup)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully"""
+        print(f"Received signal {signum}, initiating graceful shutdown...", file=sys.stderr)
+        self._shutdown = True
+        self.cleanup()
+        sys.exit(0)
+
+    def cleanup(self):
+        """Cleanup server resources"""
+        try:
+            # Cleanup all active capsules
+            for capsule_id in list(self.capsules.capsules.keys()):
+                try:
+                    metadata, cel = self.capsules.capsules[capsule_id]
+                    cel.cleanup()
+                except Exception as e:
+                    print(f"Warning: Failed to cleanup capsule {capsule_id}: {e}", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: Error during server cleanup: {e}", file=sys.stderr)
+
     def handle_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle MCP JSON-RPC request.
+        """Handle MCP JSON-RPC request (with enhanced error handling).
 
         Args:
             request: JSON-RPC request dict
@@ -45,9 +73,17 @@ class CCWMCPServer:
         Returns:
             JSON-RPC response dict
         """
+        # Validate request structure
+        if not isinstance(request, dict):
+            return self._error_response(None, -32600, "Invalid Request: not a dict")
+
         method = request.get("method", "")
         params = request.get("params", {})
         req_id = request.get("id")
+
+        # Validate method
+        if not method:
+            return self._error_response(req_id, -32600, "Invalid Request: missing method")
 
         try:
             # Route to appropriate handler
@@ -61,17 +97,23 @@ class CCWMCPServer:
             elif method == "tools/call":
                 tool_name = params.get("name", "")
                 tool_params = params.get("arguments", {})
+                if not tool_name:
+                    return self._error_response(req_id, -32602, "Invalid params: missing tool name")
                 result = self._call_tool(tool_name, tool_params)
             elif method == "resources/list":
                 result = self._list_resources()
             elif method == "resources/read":
                 uri = params.get("uri", "")
+                if not uri:
+                    return self._error_response(req_id, -32602, "Invalid params: missing URI")
                 result = self._read_resource(uri)
             elif method == "prompts/list":
                 result = self._list_prompts()
             elif method == "prompts/get":
                 name = params.get("name", "")
                 arguments = params.get("arguments", {})
+                if not name:
+                    return self._error_response(req_id, -32602, "Invalid params: missing prompt name")
                 result = self._get_prompt(name, arguments)
             elif method == "ping":
                 result = {"ok": True}
@@ -80,8 +122,16 @@ class CCWMCPServer:
 
             return self._success_response(req_id, result)
 
+        except KeyError as e:
+            return self._error_response(req_id, -32602, f"Invalid params: missing {e}")
+        except ValueError as e:
+            return self._error_response(req_id, -32602, f"Invalid params: {e}")
         except Exception as e:
-            return self._error_response(req_id, -32603, str(e))
+            import traceback
+            error_msg = f"{type(e).__name__}: {e}"
+            print(f"Error handling request: {error_msg}", file=sys.stderr)
+            print(traceback.format_exc(), file=sys.stderr)
+            return self._error_response(req_id, -32603, error_msg)
 
     def _initialize(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Handle MCP initialize handshake.
@@ -614,18 +664,36 @@ class CCWMCPServer:
         }
 
     def run_stdio(self):
-        """Run server in stdio mode (MCP standard)"""
-        for line in sys.stdin:
-            try:
-                request = json.loads(line)
-                response = self.handle_request(request)
-                if response is not None:
-                    print(json.dumps(response), flush=True)
-            except json.JSONDecodeError:
-                continue
-            except Exception as e:
-                error_response = self._error_response(None, -32700, str(e))
-                print(json.dumps(error_response), flush=True)
+        """Run server in stdio mode (MCP standard, optimized)"""
+        try:
+            for line in sys.stdin:
+                # Check for shutdown signal
+                if self._shutdown:
+                    break
+
+                # Skip empty lines
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    request = json.loads(line)
+                    response = self.handle_request(request)
+                    if response is not None:
+                        print(json.dumps(response), flush=True)
+                except json.JSONDecodeError as e:
+                    error_response = self._error_response(None, -32700, f"Parse error: {e}")
+                    print(json.dumps(error_response), flush=True)
+                except Exception as e:
+                    import traceback
+                    print(f"Unexpected error: {e}", file=sys.stderr)
+                    print(traceback.format_exc(), file=sys.stderr)
+                    error_response = self._error_response(None, -32603, f"Internal error: {e}")
+                    print(json.dumps(error_response), flush=True)
+        except KeyboardInterrupt:
+            print("Server interrupted by user", file=sys.stderr)
+        finally:
+            self.cleanup()
 
 
 def main():

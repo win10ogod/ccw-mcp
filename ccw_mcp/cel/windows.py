@@ -93,12 +93,12 @@ class WindowsCEL:
             self._monitor_thread.join(timeout=1.0)
 
     def _monitor_files(self):
-        """Monitor file system changes (simplified version)"""
+        """Monitor file system changes (optimized version)"""
         # Snapshot initial state
         initial_state = self._snapshot_files()
 
         while self._monitoring:
-            time.sleep(0.1)  # Poll interval
+            time.sleep(0.5)  # Reduced polling frequency (5x improvement)
 
         # Final snapshot
         final_state = self._snapshot_files()
@@ -196,14 +196,20 @@ class WindowsCEL:
             # Attach tracer
             tracer.attach(proc.pid)
 
-            # Sample resources periodically
+            # Sample resources periodically with adaptive interval
             start_time = time.time()
+            sample_interval = 0.2  # Reduced from 0.1s to 0.2s (50% less overhead)
             while proc.poll() is None:
                 tracer.sample()
-                if (time.time() - start_time) > timeout_sec:
+                elapsed = time.time() - start_time
+                if elapsed > timeout_sec:
                     proc.kill()
                     break
-                time.sleep(0.1)
+                # Adaptive sleep: longer intervals for long-running processes
+                if elapsed > 10.0:
+                    time.sleep(0.5)  # Less frequent sampling after 10s
+                else:
+                    time.sleep(sample_interval)
 
             # Get output
             stdout, stderr = proc.communicate(input=stdin, timeout=1.0)
@@ -243,23 +249,30 @@ class WindowsCEL:
         }
 
     def _snapshot_files(self) -> Dict[Path, float]:
-        """Create snapshot of file modification times.
+        """Create snapshot of file modification times (optimized).
 
         Returns:
             Dict mapping file paths to modification times
         """
         snapshot = {}
-        if self.sandbox_dir.exists():
-            try:
-                for item in self.sandbox_dir.rglob('*'):
-                    if item.is_file():
-                        try:
-                            rel_path = item.relative_to(self.sandbox_dir)
-                            snapshot[rel_path] = item.stat().st_mtime
-                        except (OSError, ValueError, PermissionError):
-                            pass
-            except Exception:
-                pass
+        if not self.sandbox_dir.exists():
+            return snapshot
+
+        try:
+            # Use os.walk for better performance than rglob
+            for root, _, files in os.walk(self.sandbox_dir):
+                root_path = Path(root)
+                for filename in files:
+                    try:
+                        file_path = root_path / filename
+                        rel_path = file_path.relative_to(self.sandbox_dir)
+                        snapshot[rel_path] = file_path.stat().st_mtime
+                    except (OSError, ValueError, PermissionError):
+                        # Skip inaccessible files
+                        continue
+        except Exception:
+            # Return partial snapshot on error
+            pass
         return snapshot
 
     def _detect_changes(
@@ -302,7 +315,7 @@ class WindowsCEL:
         }
 
     def get_changes(self) -> List[Path]:
-        """Get list of changed files.
+        """Get list of changed files (optimized).
 
         Returns:
             List of changed file paths (relative)
@@ -311,57 +324,86 @@ class WindowsCEL:
 
         # Compare with base
         if not self.base_dir.exists():
-            # All files are new
-            for item in self.sandbox_dir.rglob('*'):
-                if item.is_file():
-                    try:
-                        changes.append(item.relative_to(self.sandbox_dir))
-                    except ValueError:
-                        pass
+            # All files are new - use os.walk for better performance
+            try:
+                for root, _, files in os.walk(self.sandbox_dir):
+                    root_path = Path(root)
+                    for filename in files:
+                        try:
+                            file_path = root_path / filename
+                            changes.append(file_path.relative_to(self.sandbox_dir))
+                        except ValueError:
+                            continue
+            except Exception:
+                pass
         else:
-            # Check modifications
-            for item in self.sandbox_dir.rglob('*'):
-                if item.is_file():
-                    try:
-                        rel_path = item.relative_to(self.sandbox_dir)
-                        base_file = self.base_dir / rel_path
+            # Check modifications - use os.walk instead of rglob
+            try:
+                for root, _, files in os.walk(self.sandbox_dir):
+                    root_path = Path(root)
+                    for filename in files:
+                        try:
+                            item = root_path / filename
+                            rel_path = item.relative_to(self.sandbox_dir)
+                            base_file = self.base_dir / rel_path
 
-                        # New file or modified
-                        if not base_file.exists():
-                            changes.append(rel_path)
-                        else:
-                            # Compare content using hash for large files
-                            if item.stat().st_size != base_file.stat().st_size:
+                            # New file or modified
+                            if not base_file.exists():
                                 changes.append(rel_path)
                             else:
-                                # Compare content for same-size files
-                                try:
-                                    if item.read_bytes() != base_file.read_bytes():
-                                        changes.append(rel_path)
-                                except (OSError, IOError, PermissionError):
-                                    pass
-                    except (ValueError, OSError, PermissionError):
-                        pass
+                                # Fast comparison: size and mtime first
+                                item_stat = item.stat()
+                                base_stat = base_file.stat()
+
+                                if item_stat.st_size != base_stat.st_size:
+                                    changes.append(rel_path)
+                                elif item_stat.st_mtime != base_stat.st_mtime:
+                                    # Size same but mtime different - verify with hash
+                                    # Only read files > 1MB with hash, others with direct compare
+                                    if item_stat.st_size > 1024 * 1024:
+                                        # Use hash for large files
+                                        from ..util import hash_file
+                                        if hash_file(item) != hash_file(base_file):
+                                            changes.append(rel_path)
+                                    else:
+                                        # Direct compare for small files
+                                        try:
+                                            if item.read_bytes() != base_file.read_bytes():
+                                                changes.append(rel_path)
+                                        except (OSError, IOError, PermissionError):
+                                            pass
+                        except (ValueError, OSError, PermissionError):
+                            continue
+            except Exception:
+                pass
 
         return changes
 
     def cleanup(self):
-        """Clean up sandbox with Windows-specific handling"""
+        """Clean up sandbox with Windows-specific handling (optimized)"""
         self._stop_monitoring()
 
         if self._temp_root and self._temp_root.exists():
-            # Windows-specific: Retry deletion with delay
+            # Windows-specific: Retry deletion with exponential backoff
             max_retries = 3
+            retry_delay = 0.1  # Start with 100ms
+
             for attempt in range(max_retries):
                 try:
                     shutil.rmtree(self._temp_root, ignore_errors=False)
                     break
                 except (OSError, PermissionError) as e:
                     if attempt < max_retries - 1:
-                        time.sleep(0.5)  # Wait for file handles to close
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff: 0.1s, 0.2s, 0.4s
                     else:
                         # Final attempt with ignore_errors
-                        shutil.rmtree(self._temp_root, ignore_errors=True)
+                        try:
+                            shutil.rmtree(self._temp_root, ignore_errors=True)
+                        except Exception:
+                            # Log warning but don't fail
+                            import sys
+                            print(f"Warning: Failed to cleanup {self._temp_root}", file=sys.stderr)
 
     @classmethod
     def rehydrate(

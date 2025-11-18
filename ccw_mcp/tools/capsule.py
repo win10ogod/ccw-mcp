@@ -25,7 +25,7 @@ class CapsuleMetadata:
 
 
 class CapsuleRegistry:
-    """Registry for managing capsules"""
+    """Registry for managing capsules (optimized with lazy loading)"""
 
     def __init__(self, storage_dir: Path):
         """Initialize capsule registry.
@@ -36,7 +36,8 @@ class CapsuleRegistry:
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.capsules: Dict[str, tuple[CapsuleMetadata, CEL]] = {}
-        self._load_existing_capsules()
+        # Lazy loading: don't load all capsules at startup
+        # self._load_existing_capsules()  # Removed for performance
 
     def create(
         self,
@@ -144,12 +145,26 @@ class CapsuleRegistry:
         return entry
 
     def list(self) -> List[str]:
-        """List all capsule IDs.
+        """List all capsule IDs (including on-disk capsules).
 
         Returns:
             List of capsule IDs
         """
-        return list(self.capsules.keys())
+        # Return in-memory capsules
+        capsule_ids = set(self.capsules.keys())
+
+        # Scan storage directory for persisted capsules
+        if self.storage_dir.exists():
+            try:
+                for capsule_dir in self.storage_dir.iterdir():
+                    if capsule_dir.is_dir():
+                        meta_file = capsule_dir / "metadata.json"
+                        if meta_file.exists():
+                            capsule_ids.add(capsule_dir.name)
+            except Exception:
+                pass
+
+        return sorted(list(capsule_ids))
 
     def delete(self, capsule_id: str) -> bool:
         """Delete a capsule.

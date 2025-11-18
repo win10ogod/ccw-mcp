@@ -115,7 +115,7 @@ class LinuxCEL:
         timeout_ms: int = 600000,
         stdin: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Execute command in counterfactual environment.
+        """Execute command in counterfactual environment (optimized).
 
         Args:
             cmd: Command and arguments
@@ -135,7 +135,10 @@ class LinuxCEL:
             work_cwd = mount
         elif cwd.is_absolute():
             # Map absolute path to mount
-            work_cwd = mount / cwd.relative_to(cwd.anchor)
+            try:
+                work_cwd = mount / cwd.relative_to(cwd.anchor)
+            except ValueError:
+                work_cwd = mount / cwd
         else:
             work_cwd = mount / cwd
 
@@ -165,9 +168,25 @@ class LinuxCEL:
             # Attach tracer
             tracer.attach(proc.pid)
 
-            # Communicate with timeout
-            stdout, stderr = proc.communicate(input=stdin, timeout=timeout_sec)
-            exit_code = proc.returncode
+            # Sample resources periodically for better tracking
+            import threading
+            stop_sampling = threading.Event()
+
+            def sample_loop():
+                while not stop_sampling.is_set():
+                    tracer.sample()
+                    stop_sampling.wait(0.2)  # Sample every 200ms
+
+            sample_thread = threading.Thread(target=sample_loop, daemon=True)
+            sample_thread.start()
+
+            try:
+                # Communicate with timeout
+                stdout, stderr = proc.communicate(input=stdin, timeout=timeout_sec)
+                exit_code = proc.returncode
+            finally:
+                stop_sampling.set()
+                sample_thread.join(timeout=0.5)
 
         except subprocess.TimeoutExpired:
             proc.kill()
@@ -198,19 +217,27 @@ class LinuxCEL:
         }
 
     def _collect_touched_files(self) -> Dict[str, List[str]]:
-        """Collect touched files in overlay.
+        """Collect touched files in overlay (optimized).
 
         Returns:
             Dict with 'read' and 'written' file lists
         """
         written = []
 
-        # Files in upper dir are written
+        # Files in upper dir are written - use os.walk for better performance
         if self.upper_dir.exists():
-            for item in self.upper_dir.rglob('*'):
-                if item.is_file():
-                    rel_path = item.relative_to(self.upper_dir)
-                    written.append(str(rel_path))
+            try:
+                for root, _, files in os.walk(self.upper_dir):
+                    root_path = Path(root)
+                    for filename in files:
+                        try:
+                            file_path = root_path / filename
+                            rel_path = file_path.relative_to(self.upper_dir)
+                            written.append(str(rel_path))
+                        except (ValueError, OSError):
+                            continue
+            except Exception:
+                pass
 
         # For reads, we would need strace or similar - simplified here
         read = []
@@ -221,7 +248,7 @@ class LinuxCEL:
         }
 
     def get_changes(self) -> List[Path]:
-        """Get list of changed files.
+        """Get list of changed files (optimized).
 
         Returns:
             List of changed file paths (relative)
@@ -229,10 +256,19 @@ class LinuxCEL:
         changes = []
 
         if self.upper_dir.exists():
-            for item in self.upper_dir.rglob('*'):
-                if item.is_file():
-                    rel_path = item.relative_to(self.upper_dir)
-                    changes.append(rel_path)
+            try:
+                # Use os.walk for better performance than rglob
+                for root, _, files in os.walk(self.upper_dir):
+                    root_path = Path(root)
+                    for filename in files:
+                        try:
+                            file_path = root_path / filename
+                            rel_path = file_path.relative_to(self.upper_dir)
+                            changes.append(rel_path)
+                        except (ValueError, OSError):
+                            continue
+            except Exception:
+                pass
 
         return changes
 
