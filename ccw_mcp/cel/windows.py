@@ -199,11 +199,13 @@ class WindowsCEL:
             # Sample resources periodically with adaptive interval
             start_time = time.time()
             sample_interval = 0.2  # Reduced from 0.1s to 0.2s (50% less overhead)
+            timed_out = False
             while proc.poll() is None:
                 tracer.sample()
                 elapsed = time.time() - start_time
                 if elapsed > timeout_sec:
                     proc.kill()
+                    timed_out = True
                     break
                 # Adaptive sleep: longer intervals for long-running processes
                 if elapsed > 10.0:
@@ -213,7 +215,7 @@ class WindowsCEL:
 
             # Get output
             stdout, stderr = proc.communicate(input=stdin, timeout=1.0)
-            exit_code = proc.returncode
+            exit_code = -1 if timed_out else proc.returncode
 
         except subprocess.TimeoutExpired:
             proc.kill()
