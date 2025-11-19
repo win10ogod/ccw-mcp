@@ -27,25 +27,46 @@ class CCWMCPServer:
         Args:
             storage_dir: Directory for storing server data
         """
-        self.storage_dir = Path(storage_dir)
-        self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self._shutdown = False
+        try:
+            self.storage_dir = Path(storage_dir)
+            self.storage_dir.mkdir(parents=True, exist_ok=True)
+            self._shutdown = False
 
-        # Initialize components
-        self.capsules = CapsuleRegistry(storage_dir / "capsules")
-        self.witnesses = WitnessEngine(storage_dir / "witnesses")
-        self.policy_engine = PolicyEngine()
-        self.promote_engine = PromoteEngine(self.policy_engine)
-        self.deltamin = DeltaMinimizer()
-        self.commute = CommutativityAnalyzer()
+            # Initialize components
+            print(f"  Initializing CapsuleRegistry...", file=sys.stderr, flush=True)
+            self.capsules = CapsuleRegistry(storage_dir / "capsules")
 
-        # Register cleanup handlers
-        atexit.register(self.cleanup)
+            print(f"  Initializing WitnessEngine...", file=sys.stderr, flush=True)
+            self.witnesses = WitnessEngine(storage_dir / "witnesses")
 
-        # Register signal handlers (SIGTERM not available on Windows)
-        signal.signal(signal.SIGINT, self._signal_handler)
-        if hasattr(signal, 'SIGTERM'):
-            signal.signal(signal.SIGTERM, self._signal_handler)
+            print(f"  Initializing PolicyEngine...", file=sys.stderr, flush=True)
+            self.policy_engine = PolicyEngine()
+
+            print(f"  Initializing PromoteEngine...", file=sys.stderr, flush=True)
+            self.promote_engine = PromoteEngine(self.policy_engine)
+
+            print(f"  Initializing DeltaMinimizer...", file=sys.stderr, flush=True)
+            self.deltamin = DeltaMinimizer()
+
+            print(f"  Initializing CommutativityAnalyzer...", file=sys.stderr, flush=True)
+            self.commute = CommutativityAnalyzer()
+
+            # Register cleanup handlers
+            print(f"  Registering cleanup handlers...", file=sys.stderr, flush=True)
+            atexit.register(self.cleanup)
+
+            # Register signal handlers (SIGTERM not available on Windows)
+            print(f"  Registering signal handlers...", file=sys.stderr, flush=True)
+            signal.signal(signal.SIGINT, self._signal_handler)
+            if hasattr(signal, 'SIGTERM'):
+                signal.signal(signal.SIGTERM, self._signal_handler)
+
+            print(f"  All components initialized successfully", file=sys.stderr, flush=True)
+        except Exception as e:
+            import traceback
+            print(f"ERROR during server initialization: {e}", file=sys.stderr, flush=True)
+            print(traceback.format_exc(), file=sys.stderr, flush=True)
+            raise
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
@@ -1046,6 +1067,13 @@ class CCWMCPServer:
 
     def run_stdio(self):
         """Run server in stdio mode (MCP standard, optimized)"""
+        # Ensure stdout/stderr are in text mode with UTF-8 encoding (important for Windows)
+        if sys.platform == 'win32':
+            import io
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
+            sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
+
         try:
             for line in sys.stdin:
                 # Check for shutdown signal
@@ -1061,47 +1089,68 @@ class CCWMCPServer:
                     request = json.loads(line)
                     response = self.handle_request(request)
                     if response is not None:
-                        print(json.dumps(response), flush=True)
+                        print(json.dumps(response, ensure_ascii=False), flush=True)
                 except json.JSONDecodeError as e:
                     error_response = self._error_response(None, -32700, f"Parse error: {e}")
-                    print(json.dumps(error_response), flush=True)
+                    print(json.dumps(error_response, ensure_ascii=False), flush=True)
                 except Exception as e:
                     import traceback
-                    print(f"Unexpected error: {e}", file=sys.stderr)
-                    print(traceback.format_exc(), file=sys.stderr)
+                    print(f"Unexpected error: {e}", file=sys.stderr, flush=True)
+                    print(traceback.format_exc(), file=sys.stderr, flush=True)
                     error_response = self._error_response(None, -32603, f"Internal error: {e}")
-                    print(json.dumps(error_response), flush=True)
+                    print(json.dumps(error_response, ensure_ascii=False), flush=True)
         except KeyboardInterrupt:
-            print("Server interrupted by user", file=sys.stderr)
+            print("Server interrupted by user", file=sys.stderr, flush=True)
+        except Exception as e:
+            import traceback
+            print(f"Fatal error in stdio loop: {e}", file=sys.stderr, flush=True)
+            print(traceback.format_exc(), file=sys.stderr, flush=True)
         finally:
             self.cleanup()
 
 
 def main():
     """Main entry point"""
-    parser = argparse.ArgumentParser(description="CCW-MCP Server")
-    parser.add_argument(
-        "--stdio",
-        action="store_true",
-        help="Run in stdio mode (default)"
-    )
-    parser.add_argument(
-        "--storage",
-        type=str,
-        default="~/.ccw-mcp",
-        help="Storage directory for server data"
-    )
+    try:
+        # Set UTF-8 encoding for Windows early
+        if sys.platform == 'win32':
+            import io
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
 
-    args = parser.parse_args()
+        parser = argparse.ArgumentParser(description="CCW-MCP Server")
+        parser.add_argument(
+            "--stdio",
+            action="store_true",
+            help="Run in stdio mode (default)"
+        )
+        parser.add_argument(
+            "--storage",
+            type=str,
+            default="~/.ccw-mcp",
+            help="Storage directory for server data"
+        )
 
-    storage_dir = Path(args.storage).expanduser()
-    server = CCWMCPServer(storage_dir)
+        args = parser.parse_args()
 
-    if args.stdio or len(sys.argv) == 1:
-        server.run_stdio()
-    else:
-        print("CCW-MCP Server")
-        print("Usage: ccw-mcp --stdio")
+        storage_dir = Path(args.storage).expanduser()
+
+        # Log startup for debugging
+        print(f"CCW-MCP starting with storage: {storage_dir}", file=sys.stderr, flush=True)
+
+        server = CCWMCPServer(storage_dir)
+
+        print(f"CCW-MCP server initialized successfully", file=sys.stderr, flush=True)
+
+        if args.stdio or len(sys.argv) == 1:
+            server.run_stdio()
+        else:
+            print("CCW-MCP Server")
+            print("Usage: ccw-mcp --stdio")
+    except Exception as e:
+        import traceback
+        print(f"FATAL: Failed to start server: {e}", file=sys.stderr, flush=True)
+        print(traceback.format_exc(), file=sys.stderr, flush=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
