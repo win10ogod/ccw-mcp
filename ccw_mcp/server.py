@@ -81,7 +81,7 @@ class CCWMCPServer:
             request: JSON-RPC request dict
 
         Returns:
-            JSON-RPC response dict
+            JSON-RPC response dict, or None for notifications
         """
         # Validate request structure
         if not isinstance(request, dict):
@@ -95,12 +95,16 @@ class CCWMCPServer:
         if not method:
             return self._error_response(req_id, -32600, "Invalid Request: missing method")
 
+        # According to JSON-RPC 2.0 spec, if id is null or missing, this is a notification
+        # and we should not send a response (except for parse errors)
+        is_notification = req_id is None
+
         try:
             # Route to appropriate handler
             if method == "initialize":
                 result = self._initialize(params)
             elif method == "initialized":
-                # Notification; no response
+                # This is always a notification; no response
                 return None  # type: ignore[return-value]
             elif method == "tools/list":
                 result = self._list_tools()
@@ -108,6 +112,9 @@ class CCWMCPServer:
                 tool_name = params.get("name", "")
                 tool_params = params.get("arguments", {})
                 if not tool_name:
+                    # For notifications, don't send error response
+                    if is_notification:
+                        return None  # type: ignore[return-value]
                     return self._error_response(req_id, -32602, "Invalid params: missing tool name")
                 result = self._call_tool(tool_name, tool_params)
             elif method == "resources/list":
@@ -115,6 +122,9 @@ class CCWMCPServer:
             elif method == "resources/read":
                 uri = params.get("uri", "")
                 if not uri:
+                    # For notifications, don't send error response
+                    if is_notification:
+                        return None  # type: ignore[return-value]
                     return self._error_response(req_id, -32602, "Invalid params: missing URI")
                 result = self._read_resource(uri)
             elif method == "resources/templates/list":
@@ -125,24 +135,45 @@ class CCWMCPServer:
                 name = params.get("name", "")
                 arguments = params.get("arguments", {})
                 if not name:
+                    # For notifications, don't send error response
+                    if is_notification:
+                        return None  # type: ignore[return-value]
                     return self._error_response(req_id, -32602, "Invalid params: missing prompt name")
                 result = self._get_prompt(name, arguments)
             elif method == "ping":
                 result = {"ok": True}
             else:
+                # For notifications with unknown methods, don't send error response
+                if is_notification:
+                    return None  # type: ignore[return-value]
                 return self._error_response(req_id, -32601, f"Method not found: {method}")
+
+            # For notifications, don't send success response
+            if is_notification:
+                return None  # type: ignore[return-value]
 
             return self._success_response(req_id, result)
 
         except KeyError as e:
+            # For notifications, log error but don't send response
+            if is_notification:
+                print(f"Error in notification: Invalid params: missing {e}", file=sys.stderr)
+                return None  # type: ignore[return-value]
             return self._error_response(req_id, -32602, f"Invalid params: missing {e}")
         except ValueError as e:
+            # For notifications, log error but don't send response
+            if is_notification:
+                print(f"Error in notification: Invalid params: {e}", file=sys.stderr)
+                return None  # type: ignore[return-value]
             return self._error_response(req_id, -32602, f"Invalid params: {e}")
         except Exception as e:
             import traceback
             error_msg = f"{type(e).__name__}: {e}"
             print(f"Error handling request: {error_msg}", file=sys.stderr)
             print(traceback.format_exc(), file=sys.stderr)
+            # For notifications, log error but don't send response
+            if is_notification:
+                return None  # type: ignore[return-value]
             return self._error_response(req_id, -32603, error_msg)
 
     def _initialize(self, params: Dict[str, Any]) -> Dict[str, Any]:
