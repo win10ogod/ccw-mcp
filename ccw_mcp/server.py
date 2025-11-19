@@ -33,35 +33,21 @@ class CCWMCPServer:
             self._shutdown = False
 
             # Initialize components
-            print(f"  Initializing CapsuleRegistry...", file=sys.stderr, flush=True)
             self.capsules = CapsuleRegistry(storage_dir / "capsules")
-
-            print(f"  Initializing WitnessEngine...", file=sys.stderr, flush=True)
             self.witnesses = WitnessEngine(storage_dir / "witnesses")
-
-            print(f"  Initializing PolicyEngine...", file=sys.stderr, flush=True)
             self.policy_engine = PolicyEngine()
-
-            print(f"  Initializing PromoteEngine...", file=sys.stderr, flush=True)
             self.promote_engine = PromoteEngine(self.policy_engine)
-
-            print(f"  Initializing DeltaMinimizer...", file=sys.stderr, flush=True)
             self.deltamin = DeltaMinimizer()
-
-            print(f"  Initializing CommutativityAnalyzer...", file=sys.stderr, flush=True)
             self.commute = CommutativityAnalyzer()
 
             # Register cleanup handlers
-            print(f"  Registering cleanup handlers...", file=sys.stderr, flush=True)
             atexit.register(self.cleanup)
 
             # Register signal handlers (SIGTERM not available on Windows)
-            print(f"  Registering signal handlers...", file=sys.stderr, flush=True)
             signal.signal(signal.SIGINT, self._signal_handler)
             if hasattr(signal, 'SIGTERM'):
                 signal.signal(signal.SIGTERM, self._signal_handler)
 
-            print(f"  All components initialized successfully", file=sys.stderr, flush=True)
         except Exception as e:
             import traceback
             print(f"ERROR during server initialization: {e}", file=sys.stderr, flush=True)
@@ -131,6 +117,8 @@ class CCWMCPServer:
                 if not uri:
                     return self._error_response(req_id, -32602, "Invalid params: missing URI")
                 result = self._read_resource(uri)
+            elif method == "resources/templates/list":
+                result = {"resourceTemplates": []}
             elif method == "prompts/list":
                 result = self._list_prompts()
             elif method == "prompts/get":
@@ -170,7 +158,10 @@ class CCWMCPServer:
             },
             "capabilities": {
                 "tools": {},
-                "resources": {},
+                "resources": {
+                    "subscribe": False,
+                    "listChanged": False
+                },
                 "prompts": {},
                 "sampling": {},
                 "logging": {},
@@ -1134,12 +1125,7 @@ def main():
 
         storage_dir = Path(args.storage).expanduser()
 
-        # Log startup for debugging
-        print(f"CCW-MCP starting with storage: {storage_dir}", file=sys.stderr, flush=True)
-
         server = CCWMCPServer(storage_dir)
-
-        print(f"CCW-MCP server initialized successfully", file=sys.stderr, flush=True)
 
         if args.stdio or len(sys.argv) == 1:
             server.run_stdio()
