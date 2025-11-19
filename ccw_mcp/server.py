@@ -41,8 +41,11 @@ class CCWMCPServer:
 
         # Register cleanup handlers
         atexit.register(self.cleanup)
-        signal.signal(signal.SIGTERM, self._signal_handler)
+
+        # Register signal handlers (SIGTERM not available on Windows)
         signal.signal(signal.SIGINT, self._signal_handler)
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, self._signal_handler)
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
